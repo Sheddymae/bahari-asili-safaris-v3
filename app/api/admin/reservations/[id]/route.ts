@@ -229,32 +229,169 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       return NextResponse.json({ success: true, reservation: updated });
     }
 
-    // Generic field update (admin notes, payment status, total price, etc.)
-    const allowedFields = [
-      'admin_notes', 'payment_status', 'total_price', 'hotel_name',
-      'pickup_location', 'nationality', 'reservation_status',
-      'invoice_status', 'invoice_number', 'deposit_amount', 'due_date',
-    ];
-    const updates: Record<string, any> = {};
-    for (const field of allowedFields) {
-      if (field in body) updates[field] = body[field];
-    }
-    if (Object.keys(updates).length === 0) {
-      return NextResponse.json({ success: false, error: 'No valid fields to update.' }, { status: 400 });
-    }
+// Generic field update — used by "Save Changes"
+const allowedFields = [
+  'admin_notes',
+  'payment_status',
+  'total_price',
+  'hotel_name',
+  'pickup_location',
+  'nationality',
+  'reservation_status',
+  'invoice_status',
+  'invoice_number',
+  'deposit_amount',
+  'due_date',
+];
 
-    const wasUnpaid = booking.payment_status !== 'paid';
-    const { data: updated, error: updateError } = await admin
-      .from('bookings')
-      .update(updates)
-      .eq('id', params.id)
-      .select()
-      .maybeSingle();
+const updates: Record<string, any> = {};
 
-    if (updateError) {
-      console.error('Generic update error:', updateError.message);
-      return NextResponse.json({ success: false, error: 'Failed to update reservation.' }, { status: 500 });
-    }
+for (const field of allowedFields) {
+  if (Object.prototype.hasOwnProperty.call(body, field)) {
+    updates[field] = body[field];
+  }
+}
+
+if (Object.keys(updates).length === 0) {
+  return NextResponse.json(
+    {
+      success: false,
+      error: 'No valid fields to update.',
+    },
+    { status: 400 }
+  );
+}
+
+// Normalize numeric fields
+if ('total_price' in updates) {
+  const total = Number(updates.total_price);
+
+  if (!Number.isFinite(total) || total < 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Total price must be a valid number greater than or equal to 0.',
+      },
+      { status: 400 }
+    );
+  }
+
+  updates.total_price = total;
+}
+
+if ('deposit_amount' in updates) {
+  const deposit = Number(updates.deposit_amount);
+
+  if (!Number.isFinite(deposit) || deposit < 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Deposit amount must be a valid number greater than or equal to 0.',
+      },
+      { status: 400 }
+    );
+  }
+
+  updates.deposit_amount = deposit;
+}
+
+// Normalize payment status
+if ('payment_status' in updates) {
+  const validPaymentStatuses = ['unpaid', 'partial', 'paid'];
+
+  if (!validPaymentStatuses.includes(updates.payment_status)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Invalid payment status.',
+      },
+      { status: 400 }
+    );
+  }
+}
+
+// Normalize reservation status
+if ('reservation_status' in updates) {
+  const validReservationStatuses = [
+    'pending',
+    'confirmed',
+    'cancelled',
+    'completed',
+  ];
+
+  if (!validReservationStatuses.includes(updates.reservation_status)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Invalid reservation status.',
+      },
+      { status: 400 }
+    );
+  }
+}
+
+const wasUnpaid = booking.payment_status !== 'paid';
+
+const { data: updated, error: updateError } = await admin
+  .from('bookings')
+  .update(updates)
+  .eq('id', params.id)
+  .select()
+  .maybeSingle();
+
+if (updateError) {
+  console.error('========================================');
+  console.error('SAVE CHANGES FAILED');
+  console.error('Booking ID:', params.id);
+  console.error('Updates:', updates);
+  console.error('Supabase error:', updateError);
+  console.error('========================================');
+
+  return NextResponse.json(
+    {
+      success: false,
+      error: updateError.message || 'Failed to update reservation.',
+      details: updateError.details || null,
+      hint: updateError.hint || null,
+      code: updateError.code || null,
+    },
+    { status: 500 }
+  );
+}
+
+if (!updated) {
+  return NextResponse.json(
+    {
+      success: false,
+      error: 'Reservation was not updated.',
+    },
+    { status: 404 }
+  );
+}
+
+// If payment was changed from unpaid/partial to paid,
+// notify the admin.
+if (
+  wasUnpaid &&
+  updates.payment_status === 'paid' &&
+  emailApiKey &&
+  adminEmail
+) {
+  try {
+    await sendEmail(
+      adminEmail,
+      `Payment Received — ${booking.booking_ref}`,
+      buildAdminPaymentReceivedEmailHtml(updated as Booking)
+    );
+  } catch (emailError) {
+    console.error('Payment notification email failed:', emailError);
+  }
+}
+
+return NextResponse.json({
+  success: true,
+  reservation: updated,
+});
 
     // "Admin receives ... Every payment" — fire when payment_status transitions to 'paid'.
     if (wasUnpaid && updates.payment_status === 'paid' && emailApiKey && adminEmail && updated) {
