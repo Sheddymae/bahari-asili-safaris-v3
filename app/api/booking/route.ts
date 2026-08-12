@@ -177,49 +177,85 @@ export async function POST(req: NextRequest) {
     const day = String(d.getDate()).padStart(2, '0');
 
     // Use service-role client to bypass RLS for server-side insert
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 
-    let bookingRef = `BA-${y}${m}${day}-001`;
+if (!supabaseUrl || !serviceKey) {
+  console.error('Missing Supabase environment variables.', {
+    hasSupabaseUrl: !!supabaseUrl,
+    hasServiceRoleKey: !!serviceKey,
+  });
 
-    if (!serviceKey) {
-      console.error('SUPABASE_SERVICE_ROLE_KEY is not set — booking cannot be saved to the database.');
-    }
+  return NextResponse.json(
+    {
+      success: false,
+      error: 'Booking service is temporarily unavailable.',
+    },
+    { status: 500 }
+  );
+}
 
-    if (serviceKey) {
-      const admin = createClient(supabaseUrl, serviceKey);
+let bookingRef = `BA-${y}${m}${day}-001`;
 
-      // Count existing bookings for this date to generate sequence
-      const { count } = await admin
-        .from('bookings')
-        .select('id', { count: 'exact', head: true })
-        .eq('arrival_date', arrivalDate);
+const admin = createClient(supabaseUrl, serviceKey);
 
-      const seq = (count ?? 0) + 1;
-      bookingRef = `BA-${y}${m}${day}-${String(seq).padStart(3, '0')}`;
+// Count existing bookings for this date
+const { count, error: countError } = await admin
+  .from('bookings')
+  .select('id', { count: 'exact', head: true })
+  .eq('arrival_date', arrivalDate);
 
-      // Insert booking row (service role bypasses RLS)
-      const { error: saveError } = await admin.from('bookings').insert({
-        booking_ref: bookingRef,
-        first_name: firstName,
-        last_name: lastName,
-        email,
-        whatsapp,
-        adults,
-        children,
-        kids_ages: children > 0 ? kidsAges : null,
-        arrival_date: arrivalDate,
-        safari_name: safariName,
-        message,
-        reservation_status: 'pending',
-        payment_status: 'unpaid',
-        user_id: userId,
-      });
+if (countError) {
+  console.error('Supabase count error:', countError);
 
-      if (saveError) {
-        console.error('Supabase insert error:', saveError);
-      }
-    }
+  return NextResponse.json(
+    {
+      success: false,
+      error: countError.message,
+      code: countError.code,
+      details: countError.details,
+      hint: countError.hint,
+    },
+    { status: 500 }
+  );
+}
+
+const seq = (count ?? 0) + 1;
+bookingRef = `BA-${y}${m}${day}-${String(seq).padStart(3, '0')}`;
+
+const { error: saveError } = await admin
+  .from('bookings')
+  .insert({
+    booking_ref: bookingRef,
+    first_name: firstName,
+    last_name: lastName,
+    email,
+    whatsapp,
+    adults,
+    children,
+    kids_ages: children > 0 ? kidsAges : null,
+    arrival_date: arrivalDate,
+    safari_name: safariName,
+    message,
+    reservation_status: 'pending',
+    payment_status: 'unpaid',
+    user_id: userId,
+  });
+
+if (saveError) {
+  console.error('Supabase insert error:', saveError);
+
+  return NextResponse.json(
+    {
+      success: false,
+      error: saveError.message,
+      code: saveError.code,
+      details: saveError.details,
+      hint: saveError.hint,
+    },
+    { status: 500 }
+  );
+}
 
     // --- send emails via Resend ---
     const apiKey = process.env.EMAIL_API_KEY;
