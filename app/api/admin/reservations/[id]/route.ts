@@ -488,13 +488,19 @@ return NextResponse.json({
   adminEmail &&
   updated
 ) {
-  const paymentAdminEmail = adminEmail;
-
-  await sendEmail(
-    paymentAdminEmail,
-    `Payment Received — ${booking.booking_ref}`,
-    buildAdminPaymentReceivedEmailHtml(updated as Booking)
-  );
+if (
+  wasUnpaid &&
+  updates.payment_status === 'paid' &&
+  emailApiKey &&
+  adminEmail &&
+  updated
+) {
+ await sendEmail(
+  adminEmail as string,
+  `Payment Received — ${booking?.booking_ref || updated.booking_ref}`,
+  buildAdminPaymentReceivedEmailHtml(updated as Booking)
+);
+}
 }
 
     return NextResponse.json({ success: true, reservation: updated });

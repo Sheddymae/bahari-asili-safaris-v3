@@ -315,14 +315,18 @@ if (saveError) {
     }
 
     return NextResponse.json({ success: true, bookingRef, emailSent });
-  } catch (err: unknown) {
-  console.error('BOOKING API ERROR:', err);
+    } catch (err: unknown) {
+    console.error('BOOKING API ERROR:', err);
 
-  const message =
-    err instanceof Error ? err.message : 'Unknown server error';
+    const message =
+      err instanceof Error ? err.message : 'Unknown server error';
 
-      return NextResponse.json(
-      { success: false, error: 'Something went wrong. Please try again or WhatsApp us.' },
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Something went wrong. Please try again or WhatsApp us.',
+        details: message,
+      },
       { status: 500 },
     );
   }
