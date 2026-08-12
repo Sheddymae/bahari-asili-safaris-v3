@@ -481,13 +481,21 @@ return NextResponse.json({
 });
 
     // "Admin receives ... Every payment" — fire when payment_status transitions to 'paid'.
-    if (wasUnpaid && updates.payment_status === 'paid' && emailApiKey && adminEmail && updated) {
-      await sendEmail(
-        adminEmail,
-        `Payment Received — ${booking.booking_ref}`,
-        buildAdminPaymentReceivedEmailHtml(updated as Booking)
-      );
-    }
+    if (
+  wasUnpaid &&
+  updates.payment_status === 'paid' &&
+  emailApiKey &&
+  adminEmail &&
+  updated
+) {
+  const paymentAdminEmail = adminEmail;
+
+  await sendEmail(
+    paymentAdminEmail,
+    `Payment Received — ${booking.booking_ref}`,
+    buildAdminPaymentReceivedEmailHtml(updated as Booking)
+  );
+}
 
     return NextResponse.json({ success: true, reservation: updated });
   } catch (err) {
