@@ -10,28 +10,80 @@ import {
 } from '@/lib/email-templates';
 import type { Booking } from '@/lib/supabase';
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
     const admin = getSupabaseAdmin();
-    const { data, error } = await admin.from('bookings').select('*').eq('id', params.id).maybeSingle();
+
+    const { data, error } = await admin
+      .from('bookings')
+      .select('*')
+      .eq('id', params.id)
+      .maybeSingle();
+
     if (error || !data) {
-      return NextResponse.json({ success: false, error: 'Reservation not found.' }, { status: 404 });
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Reservation not found.',
+        },
+        { status: 404 }
+      );
     }
-    return NextResponse.json({ success: true, reservation: data });
+
+    return NextResponse.json({
+      success: true,
+      reservation: data,
+    });
   } catch (err) {
     console.error('Get reservation error:', err);
-    return NextResponse.json({ success: false, error: 'Something went wrong.' }, { status: 500 });
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Something went wrong.',
+      },
+      { status: 500 }
+    );
   }
 }
 
-// PATCH body: { action: 'approve' | 'reject' | 'complete' | 'generate_invoice' | 'generate_voucher' | 'update', ...fields }
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+// PATCH body:
+// {
+//   action:
+//     'approve'
+//     | 'reject'
+//     | 'complete'
+//     | 'generate_invoice'
+//     | 'generate_voucher'
+//     | 'record_payment'
+//     | 'update',
+//   ...fields
+// }
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
   let admin;
+
   try {
     admin = getSupabaseAdmin();
   } catch (err) {
-    console.error('Patch reservation: Supabase admin client unavailable:', err);
-    return NextResponse.json({ success: false, error: 'Server is missing Supabase configuration.' }, { status: 500 });
+    console.error(
+      'Patch reservation: Supabase admin client unavailable:',
+      err
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Server is missing Supabase configuration.',
+      },
+      { status: 500 }
+    );
   }
 
   try {
@@ -45,27 +97,66 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       .maybeSingle<Booking>();
 
     if (fetchError || !booking) {
-      return NextResponse.json({ success: false, error: 'Reservation not found.' }, { status: 404 });
+      console.error('Reservation fetch failed:', fetchError);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Reservation not found.',
+        },
+        { status: 404 }
+      );
     }
 
     const emailApiKey = process.env.EMAIL_API_KEY;
     const adminEmail = process.env.EMAIL_TO;
-    if (!emailApiKey) console.error('EMAIL_API_KEY not set — admin/customer emails will be skipped.');
-    if (!adminEmail) console.error('EMAIL_TO not set — internal admin notifications will be skipped.');
 
+    if (!emailApiKey) {
+      console.error(
+        'EMAIL_API_KEY not set — admin/customer emails will be skipped.'
+      );
+    }
+
+    if (!adminEmail) {
+      console.error(
+        'EMAIL_TO not set — internal admin notifications will be skipped.'
+      );
+    }
+
+    /*
+     * ============================================================
+     * APPROVE RESERVATION
+     * ============================================================
+     */
     if (action === 'approve') {
       const updates: Partial<Booking> = {
         reservation_status: 'confirmed',
         confirmed_at: new Date().toISOString(),
       };
-      if (typeof body.total_price === 'number') updates.total_price = body.total_price;
-      if (typeof body.payment_status === 'string') updates.payment_status = body.payment_status;
-      if (!booking.invoice_status || ['draft', 'quoted', 'sent'].includes(booking.invoice_status)) {
+
+      if (typeof body.total_price === 'number') {
+        updates.total_price = body.total_price;
+      }
+
+      if (typeof body.payment_status === 'string') {
+        updates.payment_status = body.payment_status;
+      }
+
+      if (
+        !booking.invoice_status ||
+        ['draft', 'quoted', 'sent'].includes(booking.invoice_status)
+      ) {
         updates.invoice_status = 'confirmed';
       }
-      if (!booking.invoice_number) updates.invoice_number = `INV-${booking.booking_ref}`;
 
-      const merged: Booking = { ...booking, ...updates };
+      if (!booking.invoice_number) {
+        updates.invoice_number = `INV-${booking.booking_ref}`;
+      }
+
+      const merged: Booking = {
+        ...booking,
+        ...updates,
+      };
 
       const [invoice, voucher] = await Promise.all([
         generatePremiumInvoicePDF(merged as any),
@@ -73,14 +164,28 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       ]);
 
       const [invoiceUrl, voucherUrl] = await Promise.all([
-        uploadDocumentPDF(admin, `invoices/${merged.booking_ref}.pdf`, invoice.base64),
-        uploadDocumentPDF(admin, `vouchers/${merged.booking_ref}.pdf`, voucher.base64),
+        uploadDocumentPDF(
+          admin,
+          `invoices/${merged.booking_ref}.pdf`,
+          invoice.base64
+        ),
+        uploadDocumentPDF(
+          admin,
+          `vouchers/${merged.booking_ref}.pdf`,
+          voucher.base64
+        ),
       ]);
 
       updates.invoice_generated = true;
       updates.voucher_generated = true;
-      if (invoiceUrl) updates.invoice_url = invoiceUrl;
-      if (voucherUrl) updates.voucher_url = voucherUrl;
+
+      if (invoiceUrl) {
+        updates.invoice_url = invoiceUrl;
+      }
+
+      if (voucherUrl) {
+        updates.voucher_url = voucherUrl;
+      }
 
       const { data: updated, error: updateError } = await admin
         .from('bookings')
@@ -90,8 +195,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         .maybeSingle();
 
       if (updateError) {
-        console.error('Approve update error:', updateError.message);
-        return NextResponse.json({ success: false, error: 'Failed to update reservation.' }, { status: 500 });
+        console.error('Approve update error:', updateError);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: updateError.message || 'Failed to update reservation.',
+          },
+          { status: 500 }
+        );
       }
 
       const emailSent = emailApiKey
@@ -100,17 +212,36 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
             'Your Bahari Asili Safaris Booking is Confirmed',
             buildConfirmationEmailHtml(merged),
             [
-              { filename: `Invoice-${merged.booking_ref}.pdf`, content: invoice.base64 },
-              { filename: `Voucher-${merged.booking_ref}.pdf`, content: voucher.base64 },
+              {
+                filename: `Invoice-${merged.booking_ref}.pdf`,
+                content: invoice.base64,
+              },
+              {
+                filename: `Voucher-${merged.booking_ref}.pdf`,
+                content: voucher.base64,
+              },
             ]
           )
         : false;
 
-      return NextResponse.json({ success: true, reservation: updated, emailSent });
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+        emailSent,
+      });
     }
 
+    /*
+     * ============================================================
+     * REJECT / CANCEL RESERVATION
+     * ============================================================
+     */
     if (action === 'reject') {
-      const updates: Partial<Booking> = { reservation_status: 'cancelled', admin_notes: body.reason || booking.admin_notes };
+      const updates: Partial<Booking> = {
+        reservation_status: 'cancelled',
+        admin_notes: body.reason || booking.admin_notes,
+      };
+
       const { data: updated, error: updateError } = await admin
         .from('bookings')
         .update(updates)
@@ -119,48 +250,113 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         .maybeSingle();
 
       if (updateError) {
-        console.error('Reject update error:', updateError.message);
-        return NextResponse.json({ success: false, error: 'Failed to update reservation.' }, { status: 500 });
-      }
+        console.error('Reject update error:', updateError);
 
-      if (emailApiKey && adminEmail) {
-        await sendEmail(
-          adminEmail,
-          `Reservation Cancelled — ${booking.booking_ref}`,
-          buildAdminCancellationEmailHtml({ ...booking, ...updates })
+        return NextResponse.json(
+          {
+            success: false,
+            error: updateError.message || 'Failed to update reservation.',
+          },
+          { status: 500 }
         );
       }
 
-      return NextResponse.json({ success: true, reservation: updated });
+      if (emailApiKey && adminEmail) {
+        try {
+          await sendEmail(
+            adminEmail,
+            `Reservation Cancelled — ${booking.booking_ref}`,
+            buildAdminCancellationEmailHtml({
+              ...booking,
+              ...updates,
+            })
+          );
+        } catch (emailError) {
+          console.error(
+            'Cancellation notification email failed:',
+            emailError
+          );
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+      });
     }
 
+    /*
+     * ============================================================
+     * COMPLETE RESERVATION
+     * ============================================================
+     */
     if (action === 'complete') {
       const { data: updated, error: updateError } = await admin
         .from('bookings')
-        .update({ reservation_status: 'completed' })
+        .update({
+          reservation_status: 'completed',
+        })
         .eq('id', params.id)
         .select()
         .maybeSingle();
 
       if (updateError) {
-        console.error('Complete update error:', updateError.message);
-        return NextResponse.json({ success: false, error: 'Failed to update reservation.' }, { status: 500 });
+        console.error('Complete update error:', updateError);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: updateError.message || 'Failed to update reservation.',
+          },
+          { status: 500 }
+        );
       }
-      return NextResponse.json({ success: true, reservation: updated });
+
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+      });
     }
 
-    if (action === 'generate_invoice' || action === 'generate_voucher') {
+    /*
+     * ============================================================
+     * GENERATE INVOICE / VOUCHER
+     * ============================================================
+     */
+    if (
+      action === 'generate_invoice' ||
+      action === 'generate_voucher'
+    ) {
       const isInvoice = action === 'generate_invoice';
+
       const { base64 } = isInvoice
         ? await generatePremiumInvoicePDF(booking as any)
         : await generateVoucherPDF(booking);
 
-      const path = isInvoice ? `invoices/${booking.booking_ref}.pdf` : `vouchers/${booking.booking_ref}.pdf`;
-      const url = await uploadDocumentPDF(admin, path, base64);
+      const path = isInvoice
+        ? `invoices/${booking.booking_ref}.pdf`
+        : `vouchers/${booking.booking_ref}.pdf`;
+
+      const url = await uploadDocumentPDF(
+        admin,
+        path,
+        base64
+      );
 
       const updates: Partial<Booking> = isInvoice
-        ? { invoice_generated: true, ...(url ? { invoice_url: url } : {}), ...(!booking.invoice_number ? { invoice_number: `INV-${booking.booking_ref}` } : {}) }
-        : { voucher_generated: true, ...(url ? { voucher_url: url } : {}) };
+        ? {
+            invoice_generated: true,
+            ...(url ? { invoice_url: url } : {}),
+            ...(!booking.invoice_number
+              ? {
+                  invoice_number: `INV-${booking.booking_ref}`,
+                }
+              : {}),
+          }
+        : {
+            voucher_generated: true,
+            ...(url ? { voucher_url: url } : {}),
+          };
 
       const { data: updated, error: updateError } = await admin
         .from('bookings')
@@ -170,356 +366,477 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         .maybeSingle();
 
       if (updateError) {
-        console.error('Generate document update error:', updateError.message);
-        return NextResponse.json({ success: false, error: 'Failed to save generated document.' }, { status: 500 });
+        console.error(
+          'Generate document update error:',
+          updateError
+        );
+
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              updateError.message ||
+              'Failed to save generated document.',
+          },
+          { status: 500 }
+        );
       }
 
-      return NextResponse.json({ success: true, reservation: updated, url });
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+        url,
+      });
     }
 
-if (action === 'record_payment') {
-  const amount = Number(body.amount);
-  const paymentMethod = String(body.payment_method || '').trim();
+    /*
+     * ============================================================
+     * RECORD PAYMENT
+     * ============================================================
+     */
+    if (action === 'record_payment') {
+      const amount = Number(body.amount);
+      const paymentMethod = String(
+        body.payment_method || ''
+      ).trim();
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'A valid payment amount greater than 0 is required.',
-      },
-      { status: 400 }
-    );
-  }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              'A valid payment amount greater than 0 is required.',
+          },
+          { status: 400 }
+        );
+      }
 
-  const total = Number(booking.total_price || 0);
-  const previousPaid = Number(booking.amount_paid || 0);
-  const newAmountPaid = previousPaid + amount;
+      const total = Number(booking.total_price || 0);
+      const previousPaid = Number(booking.amount_paid || 0);
+      const newAmountPaid = previousPaid + amount;
 
-  // Prevent recording more than the invoice total when a total exists.
-  if (total > 0 && newAmountPaid > total) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: `Payment exceeds the total price. Remaining balance is KES ${Math.max(
+      /*
+       * Do not allow the admin to record more than the
+       * invoice total.
+       */
+      if (total > 0 && newAmountPaid > total) {
+        const remaining = Math.max(
           0,
           total - previousPaid
-        ).toLocaleString()}.`,
-      },
-      { status: 400 }
-    );
-  }
+        );
 
-  const newBalance =
-    total > 0 ? Math.max(0, total - newAmountPaid) : 0;
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Payment exceeds the total price. Remaining balance is KES ${remaining.toLocaleString()}.`,
+          },
+          { status: 400 }
+        );
+      }
 
-  let newPaymentStatus: Booking['payment_status'] = 'partial';
-  let newInvoiceStatus: Booking['invoice_status'] = 'partially_paid';
+      const newBalance =
+        total > 0
+          ? Math.max(0, total - newAmountPaid)
+          : 0;
 
-  if (total > 0 && newAmountPaid >= total) {
-    newPaymentStatus = 'paid';
-    newInvoiceStatus = 'paid';
-  } else if (newAmountPaid <= 0) {
-    newPaymentStatus = 'unpaid';
-    newInvoiceStatus = 'draft';
-  }
+      let newPaymentStatus: Booking['payment_status'] =
+        'partial';
 
-  const updates = {
-    amount_paid: newAmountPaid,
-    balance_due: newBalance,
-    payment_status: newPaymentStatus,
-    invoice_status: newInvoiceStatus,
-    payment_method:
-      paymentMethod || booking.payment_method || null,
-    payment_date: new Date().toISOString(),
-  };
+      let newInvoiceStatus: Booking['invoice_status'] =
+        'partially_paid';
 
-  console.log('Recording payment:', {
-    bookingId: params.id,
-    bookingRef: booking.booking_ref,
-    amount,
-    total,
-    previousPaid,
-    newAmountPaid,
-    newBalance,
-    newPaymentStatus,
-    newInvoiceStatus,
-  });
+      if (total > 0 && newAmountPaid >= total) {
+        newPaymentStatus = 'paid';
+        newInvoiceStatus = 'paid';
+      } else if (newAmountPaid <= 0) {
+        newPaymentStatus = 'unpaid';
+        newInvoiceStatus = 'draft';
+      }
 
-  const { data: updated, error: updateError } = await admin
-    .from('bookings')
-    .update(updates)
-    .eq('id', params.id)
-    .select()
-    .maybeSingle();
+      const paymentUpdates: Partial<Booking> = {
+        amount_paid: newAmountPaid,
+        balance_due: newBalance,
+        payment_status: newPaymentStatus,
+        invoice_status: newInvoiceStatus,
+        payment_method:
+          paymentMethod ||
+          booking.payment_method ||
+          null,
+        payment_date: new Date().toISOString(),
+      };
 
-  if (updateError) {
-    console.error('========================================');
-    console.error('RECORD PAYMENT FAILED');
-    console.error('Booking ID:', params.id);
-    console.error('Updates:', updates);
-    console.error('Supabase error:', updateError);
-    console.error('========================================');
+      console.log('Recording payment:', {
+        bookingId: params.id,
+        bookingRef: booking.booking_ref,
+        amount,
+        total,
+        previousPaid,
+        newAmountPaid,
+        newBalance,
+        newPaymentStatus,
+        newInvoiceStatus,
+      });
 
-    return NextResponse.json(
-      {
-        success: false,
-        error: updateError.message || 'Failed to record payment.',
-        details: updateError.details || null,
-        hint: updateError.hint || null,
-        code: updateError.code || null,
-      },
-      { status: 500 }
-    );
-  }
+      const {
+        data: updated,
+        error: updateError,
+      } = await admin
+        .from('bookings')
+        .update(paymentUpdates)
+        .eq('id', params.id)
+        .select()
+        .maybeSingle();
 
-  if (!updated) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Payment was not saved.',
-      },
-      { status: 500 }
-    );
-  }
+      if (updateError) {
+        console.error('========================================');
+        console.error('RECORD PAYMENT FAILED');
+        console.error('Booking ID:', params.id);
+        console.error('Updates:', paymentUpdates);
+        console.error('Supabase error:', updateError);
+        console.error('========================================');
 
-  // Notify admin when payment makes the reservation fully paid.
-  if (
-    newPaymentStatus === 'paid' &&
-    emailApiKey &&
-    adminEmail
-  ) {
-    try {
-      await sendEmail(
-        adminEmail,
-        `Payment Received — ${booking.booking_ref}`,
-        buildAdminPaymentReceivedEmailHtml(updated as Booking)
-      );
-    } catch (emailError) {
-      console.error(
-        'Payment notification email failed:',
-        emailError
-      );
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              updateError.message ||
+              'Failed to record payment.',
+            details: updateError.details || null,
+            hint: updateError.hint || null,
+            code: updateError.code || null,
+          },
+          { status: 500 }
+        );
+      }
+
+      if (!updated) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Payment was not saved.',
+          },
+          { status: 500 }
+        );
+      }
+
+      /*
+       * Notify admin when this payment completes the
+       * reservation.
+       */
+      if (
+        newPaymentStatus === 'paid' &&
+        emailApiKey &&
+        adminEmail
+      ) {
+        try {
+          await sendEmail(
+            adminEmail,
+            `Payment Received — ${booking.booking_ref}`,
+            buildAdminPaymentReceivedEmailHtml(
+              updated as Booking
+            )
+          );
+        } catch (emailError) {
+          console.error(
+            'Payment notification email failed:',
+            emailError
+          );
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+        payment: {
+          amount,
+          total,
+          amountPaid: newAmountPaid,
+          balanceDue: newBalance,
+          paymentStatus: newPaymentStatus,
+          invoiceStatus: newInvoiceStatus,
+        },
+      });
     }
-  }
 
-  return NextResponse.json({
-    success: true,
-    reservation: updated,
-    payment: {
-      amount,
-      total,
-      amountPaid: newAmountPaid,
-      balanceDue: newBalance,
-      paymentStatus: newPaymentStatus,
-      invoiceStatus: newInvoiceStatus,
-    },
-  });
-}
+    /*
+     * ============================================================
+     * GENERIC FIELD UPDATE — SAVE CHANGES
+     * ============================================================
+     */
+    if (action === 'update' || !action) {
+      const allowedFields = [
+        'admin_notes',
+        'payment_status',
+        'total_price',
+        'hotel_name',
+        'pickup_location',
+        'nationality',
+        'reservation_status',
+        'invoice_status',
+        'invoice_number',
+        'deposit_amount',
+        'due_date',
+      ];
 
-// Generic field update — used by "Save Changes"
-const allowedFields = [
-  'admin_notes',
-  'payment_status',
-  'total_price',
-  'hotel_name',
-  'pickup_location',
-  'nationality',
-  'reservation_status',
-  'invoice_status',
-  'invoice_number',
-  'deposit_amount',
-  'due_date',
-];
+      const fieldUpdates: Record<string, any> = {};
 
-const updates: Record<string, any> = {};
+      for (const field of allowedFields) {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            body,
+            field
+          )
+        ) {
+          fieldUpdates[field] = body[field];
+        }
+      }
 
-for (const field of allowedFields) {
-  if (Object.prototype.hasOwnProperty.call(body, field)) {
-    updates[field] = body[field];
-  }
-}
+      if (Object.keys(fieldUpdates).length === 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'No valid fields to update.',
+          },
+          { status: 400 }
+        );
+      }
 
-if (Object.keys(updates).length === 0) {
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'No valid fields to update.',
-    },
-    { status: 400 }
-  );
-}
+      /*
+       * Normalize total price.
+       */
+      if ('total_price' in fieldUpdates) {
+        const total = Number(
+          fieldUpdates.total_price
+        );
 
-// Normalize numeric fields
-if ('total_price' in updates) {
-  const total = Number(updates.total_price);
+        if (!Number.isFinite(total) || total < 0) {
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'Total price must be a valid number greater than or equal to 0.',
+            },
+            { status: 400 }
+          );
+        }
 
-  if (!Number.isFinite(total) || total < 0) {
+        fieldUpdates.total_price = total;
+      }
+
+      /*
+       * Normalize deposit.
+       */
+      if ('deposit_amount' in fieldUpdates) {
+        const deposit = Number(
+          fieldUpdates.deposit_amount
+        );
+
+        if (
+          !Number.isFinite(deposit) ||
+          deposit < 0
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'Deposit amount must be a valid number greater than or equal to 0.',
+            },
+            { status: 400 }
+          );
+        }
+
+        fieldUpdates.deposit_amount = deposit;
+      }
+
+      /*
+       * Validate payment status.
+       */
+      if ('payment_status' in fieldUpdates) {
+        const validPaymentStatuses = [
+          'unpaid',
+          'partial',
+          'paid',
+        ];
+
+        if (
+          !validPaymentStatuses.includes(
+            fieldUpdates.payment_status
+          )
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'Invalid payment status.',
+            },
+            { status: 400 }
+          );
+        }
+      }
+
+      /*
+       * Validate reservation status.
+       */
+      if ('reservation_status' in fieldUpdates) {
+        const validReservationStatuses = [
+          'pending',
+          'confirmed',
+          'cancelled',
+          'completed',
+        ];
+
+        if (
+          !validReservationStatuses.includes(
+            fieldUpdates.reservation_status
+          )
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'Invalid reservation status.',
+            },
+            { status: 400 }
+          );
+        }
+      }
+
+      const wasUnpaid =
+        booking.payment_status !== 'paid';
+
+      const {
+        data: updated,
+        error: updateError,
+      } = await admin
+        .from('bookings')
+        .update(fieldUpdates)
+        .eq('id', params.id)
+        .select()
+        .maybeSingle();
+
+      if (updateError) {
+        console.error('========================================');
+        console.error('SAVE CHANGES FAILED');
+        console.error('Booking ID:', params.id);
+        console.error('Updates:', fieldUpdates);
+        console.error('Supabase error:', updateError);
+        console.error('========================================');
+
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              updateError.message ||
+              'Failed to update reservation.',
+            details: updateError.details || null,
+            hint: updateError.hint || null,
+            code: updateError.code || null,
+          },
+          { status: 500 }
+        );
+      }
+
+      if (!updated) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Reservation was not updated.',
+          },
+          { status: 404 }
+        );
+      }
+
+      /*
+       * If Save Changes changes payment status to paid,
+       * notify the admin.
+       */
+      if (
+        wasUnpaid &&
+        fieldUpdates.payment_status === 'paid' &&
+        emailApiKey &&
+        adminEmail
+      ) {
+        try {
+          await sendEmail(
+            adminEmail,
+            `Payment Received — ${booking.booking_ref}`,
+            buildAdminPaymentReceivedEmailHtml(
+              updated as Booking
+            )
+          );
+        } catch (emailError) {
+          console.error(
+            'Payment notification email failed:',
+            emailError
+          );
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        reservation: updated,
+      });
+    }
+
+    /*
+     * ============================================================
+     * UNKNOWN ACTION
+     * ============================================================
+     */
     return NextResponse.json(
       {
         success: false,
-        error: 'Total price must be a valid number greater than or equal to 0.',
+        error: `Unknown reservation action: ${action || 'none'}`,
       },
       { status: 400 }
     );
-  }
-
-  updates.total_price = total;
-}
-
-if ('deposit_amount' in updates) {
-  const deposit = Number(updates.deposit_amount);
-
-  if (!Number.isFinite(deposit) || deposit < 0) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Deposit amount must be a valid number greater than or equal to 0.',
-      },
-      { status: 400 }
-    );
-  }
-
-  updates.deposit_amount = deposit;
-}
-
-// Normalize payment status
-if ('payment_status' in updates) {
-  const validPaymentStatuses = ['unpaid', 'partial', 'paid'];
-
-  if (!validPaymentStatuses.includes(updates.payment_status)) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Invalid payment status.',
-      },
-      { status: 400 }
-    );
-  }
-}
-
-// Normalize reservation status
-if ('reservation_status' in updates) {
-  const validReservationStatuses = [
-    'pending',
-    'confirmed',
-    'cancelled',
-    'completed',
-  ];
-
-  if (!validReservationStatuses.includes(updates.reservation_status)) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Invalid reservation status.',
-      },
-      { status: 400 }
-    );
-  }
-}
-
-const wasUnpaid = booking.payment_status !== 'paid';
-
-const { data: updated, error: updateError } = await admin
-  .from('bookings')
-  .update(updates)
-  .eq('id', params.id)
-  .select()
-  .maybeSingle();
-
-if (updateError) {
-  console.error('========================================');
-  console.error('SAVE CHANGES FAILED');
-  console.error('Booking ID:', params.id);
-  console.error('Updates:', updates);
-  console.error('Supabase error:', updateError);
-  console.error('========================================');
-
-  return NextResponse.json(
-    {
-      success: false,
-      error: updateError.message || 'Failed to update reservation.',
-      details: updateError.details || null,
-      hint: updateError.hint || null,
-      code: updateError.code || null,
-    },
-    { status: 500 }
-  );
-}
-
-if (!updated) {
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'Reservation was not updated.',
-    },
-    { status: 404 }
-  );
-}
-
-// If payment was changed from unpaid/partial to paid,
-// notify the admin.
-if (
-  wasUnpaid &&
-  updates.payment_status === 'paid' &&
-  emailApiKey &&
-  adminEmail
-) {
-  try {
-    await sendEmail(
-      adminEmail,
-      `Payment Received — ${booking.booking_ref}`,
-      buildAdminPaymentReceivedEmailHtml(updated as Booking)
-    );
-  } catch (emailError) {
-    console.error('Payment notification email failed:', emailError);
-  }
-}
-
-return NextResponse.json({
-  success: true,
-  reservation: updated,
-});
-
-    // "Admin receives ... Every payment" — fire when payment_status transitions to 'paid'.
-    if (
-  wasUnpaid &&
-  updates.payment_status === 'paid' &&
-  emailApiKey &&
-  adminEmail &&
-  updated
-) {
-if (
-  wasUnpaid &&
-  updates.payment_status === 'paid' &&
-  emailApiKey &&
-  adminEmail &&
-  updated
-) {
- await sendEmail(
-  adminEmail as string,
-  `Payment Received — ${booking?.booking_ref || updated.booking_ref}`,
-  buildAdminPaymentReceivedEmailHtml(updated as Booking)
-);
-}
-}
-
-    return NextResponse.json({ success: true, reservation: updated });
   } catch (err) {
     console.error('Patch reservation error:', err);
-    return NextResponse.json({ success: false, error: 'Something went wrong.' }, { status: 500 });
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Something went wrong.',
+      },
+      { status: 500 }
+    );
   }
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
     const admin = getSupabaseAdmin();
-    const { error } = await admin.from('bookings').delete().eq('id', params.id);
+
+    const { error } = await admin
+      .from('bookings')
+      .delete()
+      .eq('id', params.id);
+
     if (error) {
-      return NextResponse.json({ success: false, error: 'Failed to delete reservation.' }, { status: 500 });
+      console.error('Delete reservation error:', error);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.message || 'Failed to delete reservation.',
+        },
+        { status: 500 }
+      );
     }
-    return NextResponse.json({ success: true });
+
+    return NextResponse.json({
+      success: true,
+    });
   } catch (err) {
     console.error('Delete reservation error:', err);
-    return NextResponse.json({ success: false, error: 'Something went wrong.' }, { status: 500 });
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Something went wrong.',
+      },
+      { status: 500 }
+    );
   }
 }
