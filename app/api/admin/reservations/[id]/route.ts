@@ -177,57 +177,144 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       return NextResponse.json({ success: true, reservation: updated, url });
     }
 
-    if (action === 'record_payment') {
-      const amount = Number(body.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        return NextResponse.json({ success: false, error: 'A valid payment amount is required.' }, { status: 400 });
-      }
+if (action === 'record_payment') {
+  const amount = Number(body.amount);
+  const paymentMethod = String(body.payment_method || '').trim();
 
-      const newAmountPaid = (booking.amount_paid || 0) + amount;
-      const total = booking.total_price || 0;
-      const newBalance = Math.max(0, total - newAmountPaid);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'A valid payment amount greater than 0 is required.',
+      },
+      { status: 400 }
+    );
+  }
 
-      let newInvoiceStatus = booking.invoice_status || 'draft';
-      let newPaymentStatus = booking.payment_status || 'unpaid';
-      if (total > 0 && newAmountPaid >= total) {
-        newInvoiceStatus = 'paid';
-        newPaymentStatus = 'paid';
-      } else if (newAmountPaid > 0) {
-        newInvoiceStatus = 'partially_paid';
-        newPaymentStatus = 'partial';
-      }
+  const total = Number(booking.total_price || 0);
+  const previousPaid = Number(booking.amount_paid || 0);
+  const newAmountPaid = previousPaid + amount;
 
-      const updates: Partial<Booking> = {
-        amount_paid: newAmountPaid,
-        balance_due: newBalance,
-        invoice_status: newInvoiceStatus,
-        payment_status: newPaymentStatus,
-        payment_method: body.payment_method || booking.payment_method,
-        payment_date: new Date().toISOString(),
-      };
+  // Prevent recording more than the invoice total when a total exists.
+  if (total > 0 && newAmountPaid > total) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `Payment exceeds the total price. Remaining balance is KES ${Math.max(
+          0,
+          total - previousPaid
+        ).toLocaleString()}.`,
+      },
+      { status: 400 }
+    );
+  }
 
-      const { data: updated, error: updateError } = await admin
-        .from('bookings')
-        .update(updates)
-        .eq('id', params.id)
-        .select()
-        .maybeSingle();
+  const newBalance =
+    total > 0 ? Math.max(0, total - newAmountPaid) : 0;
 
-      if (updateError) {
-        console.error('Record payment error:', updateError.message);
-        return NextResponse.json({ success: false, error: 'Failed to record payment.' }, { status: 500 });
-      }
+  let newPaymentStatus: Booking['payment_status'] = 'partial';
+  let newInvoiceStatus: Booking['invoice_status'] = 'partially_paid';
 
-      if (newInvoiceStatus === 'paid' && emailApiKey && adminEmail) {
-        await sendEmail(
-          adminEmail,
-          `Payment Received — ${booking.booking_ref}`,
-          buildAdminPaymentReceivedEmailHtml(updated as Booking)
-        );
-      }
+  if (total > 0 && newAmountPaid >= total) {
+    newPaymentStatus = 'paid';
+    newInvoiceStatus = 'paid';
+  } else if (newAmountPaid <= 0) {
+    newPaymentStatus = 'unpaid';
+    newInvoiceStatus = 'draft';
+  }
 
-      return NextResponse.json({ success: true, reservation: updated });
+  const updates = {
+    amount_paid: newAmountPaid,
+    balance_due: newBalance,
+    payment_status: newPaymentStatus,
+    invoice_status: newInvoiceStatus,
+    payment_method:
+      paymentMethod || booking.payment_method || null,
+    payment_date: new Date().toISOString(),
+  };
+
+  console.log('Recording payment:', {
+    bookingId: params.id,
+    bookingRef: booking.booking_ref,
+    amount,
+    total,
+    previousPaid,
+    newAmountPaid,
+    newBalance,
+    newPaymentStatus,
+    newInvoiceStatus,
+  });
+
+  const { data: updated, error: updateError } = await admin
+    .from('bookings')
+    .update(updates)
+    .eq('id', params.id)
+    .select()
+    .maybeSingle();
+
+  if (updateError) {
+    console.error('========================================');
+    console.error('RECORD PAYMENT FAILED');
+    console.error('Booking ID:', params.id);
+    console.error('Updates:', updates);
+    console.error('Supabase error:', updateError);
+    console.error('========================================');
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: updateError.message || 'Failed to record payment.',
+        details: updateError.details || null,
+        hint: updateError.hint || null,
+        code: updateError.code || null,
+      },
+      { status: 500 }
+    );
+  }
+
+  if (!updated) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Payment was not saved.',
+      },
+      { status: 500 }
+    );
+  }
+
+  // Notify admin when payment makes the reservation fully paid.
+  if (
+    newPaymentStatus === 'paid' &&
+    emailApiKey &&
+    adminEmail
+  ) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `Payment Received — ${booking.booking_ref}`,
+        buildAdminPaymentReceivedEmailHtml(updated as Booking)
+      );
+    } catch (emailError) {
+      console.error(
+        'Payment notification email failed:',
+        emailError
+      );
     }
+  }
+
+  return NextResponse.json({
+    success: true,
+    reservation: updated,
+    payment: {
+      amount,
+      total,
+      amountPaid: newAmountPaid,
+      balanceDue: newBalance,
+      paymentStatus: newPaymentStatus,
+      invoiceStatus: newInvoiceStatus,
+    },
+  });
+}
 
 // Generic field update — used by "Save Changes"
 const allowedFields = [
